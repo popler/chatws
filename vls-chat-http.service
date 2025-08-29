@@ -1,0 +1,17 @@
+[Unit]
+Description=VLS Chat HTTP (join)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vls-chat
+EnvironmentFile=/opt/vls-chat/.env
+ExecStart=/usr/local/bin/node /opt/vls-chat/server-http.js
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=VLS Chat WS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vls-chat
+EnvironmentFile=/opt/vls-chat/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/local/bin/node /opt/vls-chat/server-ws.js
+ExecStop=/bin/kill -s SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=2
+# ważne aby systemd nie wisiał w nieskończoność:
+TimeoutStopSec=10
+KillSignal=SIGTERM
+KillMode=mixed
+# (opcjonalnie większe limity FD):
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

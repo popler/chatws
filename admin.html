@@ -1,1 +1,467 @@
-// admin.html – wstaw tu swoją wersję
+<!doctype html>
+<html lang="pl" data-bs-theme="light">
+<head>
+  <meta charset="utf-8">
+  <title>VLS Chat – Panel admina</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { padding: 16px; font: 14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+    .log { max-height: 40vh; overflow:auto; background: var(--bs-tertiary-bg); border:1px solid var(--bs-border-color); border-radius:10px; padding:8px; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.9rem; }
+    .muted { color: var(--bs-secondary-color); }
+    .kbd { border:1px solid var(--bs-border-color); border-bottom-width:2px; border-radius:6px; padding:0 .35rem; font-size:.85em; background:var(--bs-tertiary-bg); }
+    .btn-xxs{ --bs-btn-padding-y:.15rem; --bs-btn-padding-x:.35rem; --bs-btn-font-size:.7rem; }
+    .form-hint{ font-size:.85em; color: var(--bs-secondary-color); }
+    .badge-dot{ display:inline-block; width:.5rem; height:.5rem; border-radius:50%; background:#31c24b; box-shadow:0 0 0 2px var(--bs-body-bg) inset; vertical-align:middle; margin-right:.35rem; }
+    .table-fixed tbody{ display:block; max-height:38vh; overflow:auto; }
+    .table-fixed thead, .table-fixed tbody tr{ display:table; width:100%; table-layout:fixed; }
+    .table-sm th, .table-sm td{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .room-row.active{ background:var(--bs-tertiary-bg); }
+  </style>
+</head>
+<body>
+<div class="container" style="max-width:1100px">
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <h3 class="mb-0">Panel administracyjny</h3>
+    <div class="d-flex gap-2">
+      <button id="btnLight" class="btn btn-outline-secondary btn-sm">☀️ Jasny</button>
+      <button id="btnDark"  class="btn btn-outline-secondary btn-sm">🌙 Ciemny</button>
+    </div>
+  </div>
+
+  <!-- Połączenie -->
+  <div class="card mb-3">
+    <div class="card-header">Połączenie</div>
+    <div class="card-body row g-2">
+      <div class="col-md-3">
+        <label class="form-label">Pokój</label>
+        <input id="room" class="form-control" placeholder="np. demo">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Nick admina</label>
+        <input id="nick" class="form-control" placeholder="np. piotrg">
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Hasło</label>
+        <div class="input-group">
+          <input id="pass" class="form-control" type="password" placeholder="Hasło admina">
+          <button id="togglePass" class="btn btn-outline-secondary" type="button">👁</button>
+        </div>
+        <div class="form-hint">Adminy i hash haseł są w <code>admins.json</code>.</div>
+      </div>
+      <div class="col-md-3 d-grid align-self-end">
+        <button id="connect" class="btn btn-primary">Połącz</button>
+      </div>
+      <div class="col-12 mt-2">
+        <span id="status" class="muted">—</span>
+        <span class="ms-3"><span class="badge-dot" id="dot" style="background:#aaa"></span><span id="presence">offline</span></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="controls" style="display:none">
+    <div class="row">
+      <!-- LEWA: Pokoje + Użytkownicy -->
+      <div class="col-lg-6">
+        <div class="card mb-3">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span>Aktywne pokoje</span>
+            <div class="d-flex align-items-center gap-2">
+              <button id="refreshRooms" class="btn btn-sm btn-outline-secondary">Odśwież</button>
+              <div class="form-check form-switch mb-0">
+                <input class="form-check-input" type="checkbox" id="autoRooms">
+                <label class="form-check-label" for="autoRooms">Auto 15s</label>
+              </div>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="table-responsive table-fixed">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr><th style="width:40%">Pokój</th><th style="width:20%">Online</th><th style="width:20%">Slow</th><th style="width:20%">Akcje</th></tr>
+                </thead>
+                <tbody id="roomsTbody"></tbody>
+              </table>
+            </div>
+            <div id="roomsInfo" class="form-hint mt-2"></div>
+          </div>
+        </div>
+
+        <div class="card mb-3">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span>Użytkownicy w pokoju: <strong id="usersRoom">—</strong></span>
+            <div class="d-flex gap-2">
+              <input id="userSearch" class="form-control form-control-sm" placeholder="Szukaj (nick/id)" style="width:220px">
+              <button id="refreshUsers" class="btn btn-sm btn-outline-secondary">Odśwież</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="table-responsive table-fixed">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr><th style="width:40%">Nick</th><th style="width:20%">ID</th><th style="width:20%">Msg</th><th style="width:20%">Akcje</th></tr>
+                </thead>
+                <tbody id="usersTbody"></tbody>
+              </table>
+            </div>
+            <div id="usersInfo" class="form-hint mt-2"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- PRAWA: Ogłoszenia / Slow / Moderacja / Logi -->
+      <div class="col-lg-6">
+        <div class="card mb-3">
+          <div class="card-header">Ogłoszenie / Slow / Clear</div>
+          <div class="card-body row g-2">
+            <div class="col-md-7">
+              <label class="form-label">PIN (ogłoszenie)</label>
+              <input id="announceText" class="form-control" placeholder="Tekst ogłoszenia (PIN)">
+            </div>
+            <div class="col-md-2 d-grid align-self-end">
+              <button id="announceBtn" class="btn btn-outline-secondary">Wyślij PIN</button>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Slow-mode</label>
+              <div class="input-group">
+                <select id="slowSelect" class="form-select">
+                  <option value="off">off</option>
+                  <option value="2s">2s</option>
+                  <option value="5s">5s</option>
+                  <option value="10s">10s</option>
+                  <option value="30s">30s</option>
+                </select>
+                <button id="slowBtn" class="btn btn-outline-secondary">Ustaw</button>
+              </div>
+            </div>
+            <div class="col-12 d-grid mt-2">
+              <button id="clearBtn" class="btn btn-outline-danger">Wyczyść czat</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card mb-3">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <span>Moderacja</span>
+            <span class="form-hint">Tip: kliknij <span class="kbd">Kopiuj</span> przy ID by wkleić niżej</span>
+          </div>
+          <div class="card-body row g-2">
+            <div class="col-md-6">
+              <label class="form-label">userId</label>
+              <div class="input-group">
+                <input id="userId" class="form-control" placeholder="userId">
+                <button id="copyUserId" class="btn btn-outline-secondary btn-xxs" type="button">Kopiuj</button>
+              </div>
+            </div>
+            <div class="col-md-2">
+              <label class="form-label">Minuty</label>
+              <input id="minutes" class="form-control" type="number" value="5" min="1">
+            </div>
+            <div class="col-md-4 d-grid align-self-end">
+              <button id="timeoutBtn" class="btn btn-outline-warning">Timeout (min)</button>
+            </div>
+
+            <div class="col-md-6">
+              <label class="form-label">messageId</label>
+              <div class="input-group">
+                <input id="msgId" class="form-control" placeholder="messageId">
+                <button id="copyMsgId" class="btn btn-outline-secondary btn-xxs" type="button">Kopiuj</button>
+              </div>
+            </div>
+            <div class="col-md-2 d-grid align-self-end">
+              <button id="banBtn"   class="btn btn-outline-danger">Ban</button>
+            </div>
+            <div class="col-md-2 d-grid align-self-end">
+              <button id="purgeBtn" class="btn btn-outline-danger">Purge</button>
+            </div>
+            <div class="col-md-2 d-grid align-self-end">
+              <button id="deleteBtn" class="btn btn-outline-danger">Usuń</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="col-lg-6">
+            <div class="card mb-3">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Audyt akcji admina (REST)</span>
+                <div class="d-flex align-items-center gap-2">
+                  <button id="downloadCsv" class="btn btn-sm btn-outline-primary">Pobierz CSV historii</button>
+                  <div class="form-check form-switch mb-0">
+                    <input class="form-check-input" type="checkbox" id="autoAudit">
+                    <label class="form-check-label" for="autoAudit">Auto 10s</label>
+                  </div>
+                  <button id="refreshAudit" class="btn btn-sm btn-outline-secondary">Odśwież</button>
+                </div>
+              </div>
+              <div class="card-body">
+                <pre class="log" id="auditLog">(pusto)</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-lg-6">
+            <div class="card mb-3">
+              <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Zdarzenia WS (ostatnie)</span>
+                <button id="clearWsLog" class="btn btn-sm btn-outline-secondary">Wyczyść</button>
+              </div>
+              <div class="card-body">
+                <pre class="log" id="wsLog">(pusto)</pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /col-lg-6 -->
+    </div><!-- /row -->
+  </div><!-- /controls -->
+</div>
+
+<script>
+/* ===== CONFIG ===== */
+const ORIGIN   = 'https://relay.popler.tv';
+const API_JOIN = ORIGIN + '/chat/api/join';
+const API_AUDIT= ORIGIN + '/chat/api/admin/audit';
+const API_ROOMS= ORIGIN + '/chat/api/rooms';
+const API_USERS= (room)=> ORIGIN + '/chat/api/rooms/' + encodeURIComponent(room) + '/users';
+const API_LOGCSV = ORIGIN + '/chat/api/admin/log.csv';
+const WS_URL   = ORIGIN.replace(/^http/,'ws') + '/chat/ws';
+
+let token=null, ws=null, room=null;
+let auditTimer=null, roomsTimer=null;
+let selectedRoom=null;
+
+const $ = (id)=>document.getElementById(id);
+const statusEl = $('status'), presenceEl=$('presence'), dotEl=$('dot'), wsLogEl=$('wsLog');
+
+function showStatus(s){ statusEl.textContent = s; }
+function setPresence(n, online){
+  presenceEl.textContent = online ? `${n} online` : 'offline';
+  dotEl.style.background = online ? '#31c24b' : '#aaa';
+}
+function appendWsLog(line){
+  const now = new Date().toISOString().replace('T',' ').slice(0,19);
+  const txt = `[${now}] ${line}\n`;
+  wsLogEl.textContent = (wsLogEl.textContent || '') + txt;
+  wsLogEl.scrollTop = wsLogEl.scrollHeight;
+}
+function copyToClipboard(text){ navigator.clipboard?.writeText(text).catch(()=>{}); }
+function fmtTs(ts){ if(!ts) return '—'; try{ const d=new Date(ts); return d.toLocaleString(); }catch{ return '—'; } }
+
+/* Theme toggle */
+$('btnLight').onclick = ()=>document.documentElement.setAttribute('data-bs-theme','light');
+$('btnDark').onclick  = ()=>document.documentElement.setAttribute('data-bs-theme','dark');
+
+/* Pamiętaj ostatni room/nick (nie hasło) */
+(function restoreSaved(){
+  const qs=new URLSearchParams(location.search);
+  $('room').value = qs.get('room') || localStorage.getItem('adm_room') || 'demo';
+  $('nick').value = qs.get('nick') || localStorage.getItem('adm_nick') || '';
+})();
+function saveCreds(){ localStorage.setItem('adm_room',$('room').value.trim()); localStorage.setItem('adm_nick',$('nick').value.trim()); }
+
+/* Show/Hide hasło + kopiuj */
+$('togglePass').onclick = ()=>{ const inp=$('pass'); inp.type = (inp.type==='password') ? 'text' : 'password'; };
+$('copyUserId').onclick = ()=>{ const v=$('userId').value.trim(); if(v) copyToClipboard(v); };
+$('copyMsgId').onclick  = ()=>{ const v=$('msgId').value.trim(); if(v) copyToClipboard(v); };
+
+/* Połącz (join + WS) */
+$('connect').onclick = async ()=>{
+  room = $('room').value.trim();
+  const displayName = $('nick').value.trim();
+  const password = $('pass').value;
+
+  if(!room || !displayName || !password){ showStatus('Uzupełnij pokój, nick i hasło.'); return; }
+
+  showStatus('Łączenie (REST)…');
+  let j;
+  try{
+    const r = await fetch(API_JOIN, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ room, displayName, password }) });
+    if (!r.ok) { showStatus('Błąd join: HTTP '+r.status); return; }
+    j = await r.json();
+    if (j.role !== 'admin') { showStatus('Brak roli admin (sprawdź nick/hasło).'); return; }
+    token = j.token;
+  }catch(e){
+    showStatus('Join error: '+e.message); return;
+  }
+  showStatus('Zalogowano jako admin.');
+  saveCreds();
+
+  // WS
+  showStatus('Łączenie (WS)…');
+  try{ ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(token)); }
+  catch(e){ showStatus('WS init error: '+e.message); return; }
+
+  ws.onopen  = ()=>{ showStatus('WS połączone.'); $('controls').style.display='block'; appendWsLog('WS OPEN'); };
+  ws.onclose = ()=>{ showStatus('WS rozłączone.'); setPresence(0,false); appendWsLog('WS CLOSE'); };
+  ws.onerror = ()=>{ showStatus('WS błąd.'); appendWsLog('WS ERROR'); };
+  ws.onmessage = (ev)=>{
+    let m; try{ m=JSON.parse(ev.data) }catch{ return; }
+    if(m.type==='hello' || m.type==='presence'){ setPresence(m.occupants ?? 1, true); appendWsLog(`${m.type.toUpperCase()} occupants=${m.occupants ?? 1}`); return; }
+    if(m.type==='message'){ const who=(m.user?.name||'user')+' ('+(m.user?.id||'-')+')'; appendWsLog(`MSG id=${m.id} by=${who} | ${m.text}`); injectLastButtons(m); return; }
+    if(m.type==='reaction'){ appendWsLog(`REACTION id=${m.id} emoji=${m.emoji} delta=${m.delta}`); injectLastButtons(m); return; }
+    if(m.type==='moderate'){ appendWsLog(`MOD action=${m.action} id=${m.id||''} user=${m.userId||''} minutes=${m.minutes||''}`); injectLastButtons(m); return; }
+    if(m.type==='announce'){ appendWsLog(`ANNOUNCE "${(m.text||'').slice(0,120)}"`); return; }
+  };
+
+  // listy pokoi/użytkowników
+  selectedRoom = room;
+  $('usersRoom').textContent = selectedRoom;
+  await refreshRooms();
+  await refreshUsers();
+  setupAutoAudit(); setupAutoRooms();
+};
+
+/* Szybkie kopiowanie ID z ostatniego zdarzenia */
+function injectLastButtons(m){
+  const toolbarId='lastIds';
+  let bar=document.getElementById(toolbarId);
+  if(!bar){ bar=document.createElement('div'); bar.id=toolbarId; bar.className='d-flex gap-2 align-items-center my-2'; wsLogEl.parentElement.insertBefore(bar, wsLogEl); }
+  bar.innerHTML='';
+  if(m.user?.id){ const b=document.createElement('button'); b.className='btn btn-outline-secondary btn-xxs'; b.textContent='Kopiuj userId'; b.onclick=()=>copyToClipboard(m.user.id); bar.appendChild(b); $('userId').value=m.user.id; }
+  if(m.id){ const b=document.createElement('button'); b.className='btn btn-outline-secondary btn-xxs'; b.textContent='Kopiuj messageId'; b.onclick=()=>copyToClipboard(m.id); bar.appendChild(b); $('msgId').value=m.id; }
+}
+
+/* Wysyłka admin-komend przez WS */
+function sendAdmin(obj){ if (ws?.readyState===1) ws.send(JSON.stringify(Object.assign({type:'admin'}, obj))); }
+
+$('announceBtn').onclick = ()=>{ const text=$('announceText').value.trim(); if(text) sendAdmin({ action:'announce', text }); };
+$('slowBtn').onclick     = ()=>{ const v=$('slowSelect').value; sendAdmin({ action:'slow', value:v }); };
+$('clearBtn').onclick    = ()=> sendAdmin({ action:'clear' });
+
+$('timeoutBtn').onclick  = ()=>{ const userId=$('userId').value.trim(); const minutes=Math.max(1, parseInt($('minutes').value||'5',10)); if(userId) sendAdmin({ action:'timeout', userId, minutes }); };
+$('banBtn').onclick      = ()=>{ const userId=$('userId').value.trim(); if(userId) sendAdmin({ action:'ban', userId }); };
+$('purgeBtn').onclick    = ()=>{ const userId=$('userId').value.trim(); if(userId) sendAdmin({ action:'purge', userId }); };
+$('deleteBtn').onclick   = ()=>{ const id=$('msgId').value.trim(); if(id) sendAdmin({ action:'delete', id }); };
+
+/* Audyt (REST) */
+async function refreshAudit(){
+  if (!token) return;
+  const url = API_AUDIT + '?room=' + encodeURIComponent(selectedRoom || room) + '&limit=300';
+  try{
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer '+token } });
+    if (!r.ok) { $('auditLog').textContent = 'Błąd: HTTP '+r.status; return; }
+    const j = await r.json();
+    const lines = (j.items||[]).map(x=>{
+      const t=new Date(x.ts||Date.now()).toISOString().replace('T',' ').slice(0,19);
+      const who=(x.name||x.by||'-');
+      const parts=[`${t}`, who.padEnd(12,' '), x.action, x.userId?`user=${x.userId}`:'', x.id?`id=${x.id}`:'', (x.minutes!=null)?`minutes=${x.minutes}`:'', (x.value!=null)?`value=${x.value}`:'', x.text?`| ${x.text}`:''].filter(Boolean);
+      return parts.join('  ');
+    });
+    $('auditLog').textContent = lines.join('\n') || '(pusto)';
+    $('auditLog').scrollTop = $('auditLog').scrollHeight;
+  }catch(e){ $('auditLog').textContent = 'Błąd: '+e.message; }
+}
+$('refreshAudit').onclick = refreshAudit;
+$('autoAudit').onchange = setupAutoAudit;
+$('clearWsLog').onclick = ()=> wsLogEl.textContent='(pusto)';
+function setupAutoAudit(){ if(auditTimer){clearInterval(auditTimer);auditTimer=null;} if($('autoAudit').checked){ auditTimer=setInterval(refreshAudit, 10000); } }
+
+/* Pobieranie CSV (z logów serwera) */
+$('downloadCsv').onclick = async ()=>{
+  if (!token) { alert('Najpierw połącz jako admin.'); return; }
+  const rname = selectedRoom || room || '';
+  if (!rname) { alert('Brak wybranego pokoju.'); return; }
+  try{
+    const url = API_LOGCSV + '?room=' + encodeURIComponent(rname);
+    const r = await fetch(url, { headers: { 'Authorization': 'Bearer '+token } });
+    if(!r.ok){
+      let msg = 'Błąd: HTTP ' + r.status;
+      try { const j = await r.json(); if (j?.error) msg += ' ('+j.error+')'; } catch {}
+      alert(msg); return;
+    }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `chat-${rname}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 800);
+  }catch(e){
+    alert('Błąd pobierania CSV: ' + (e?.message || e));
+  }
+};
+
+/* Pokoje (REST) */
+async function refreshRooms(){
+  if(!token) return;
+  const info=$('roomsInfo'); const tbody=$('roomsTbody');
+  info.textContent=''; tbody.innerHTML='';
+  try{
+    const r = await fetch(API_ROOMS, { headers: { 'Authorization':'Bearer '+token } });
+    if(!r.ok){ info.textContent = 'Błąd: HTTP '+r.status+' (czy endpoint /chat/api/rooms jest wdrożony?)'; return; }
+    const j = await r.json();
+    const rooms = (j.rooms||[]).sort((a,b)=> (b.occupants||0)-(a.occupants||0));
+    if(!rooms.length){ info.textContent='Brak aktywnych pokoi.'; return; }
+    rooms.forEach(rm=>{
+      const tr=document.createElement('tr'); tr.className='room-row'+(rm.name===selectedRoom?' active':'');
+      tr.innerHTML = `
+        <td title="${fmtTs(rm.sinceTs)}">${rm.name}</td>
+        <td>${rm.occupants??0}</td>
+        <td>${rm.slow||'off'}</td>
+        <td class="text-end">
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary btn-xxs" data-act="select">Wejdź</button>
+            <button class="btn btn-outline-secondary btn-xxs" data-act="slow"  title="Ustaw slow na 10s">10s</button>
+            <button class="btn btn-outline-danger btn-xxs"    data-act="clear">Clear</button>
+          </div>
+        </td>`;
+      tr.querySelector('[data-act="select"]').onclick = async ()=>{ selectedRoom=rm.name; $('usersRoom').textContent=selectedRoom; await refreshUsers(); refreshAudit(); document.querySelectorAll('.room-row').forEach(n=>n.classList.remove('active')); tr.classList.add('active'); };
+      tr.querySelector('[data-act="slow"]').onclick   = ()=>{ if(selectedRoom!==rm.name) selectedRoom=rm.name; sendAdmin({ action:'slow', value:'10s', room: rm.name }); };
+      tr.querySelector('[data-act="clear"]').onclick  = ()=> sendAdmin({ action:'clear', room: rm.name });
+      tbody.appendChild(tr);
+    });
+  }catch(e){ info.textContent='Błąd: '+e.message; }
+}
+$('refreshRooms').onclick = refreshRooms;
+$('autoRooms').onchange = setupAutoRooms;
+function setupAutoRooms(){ if(roomsTimer){clearInterval(roomsTimer);roomsTimer=null;} if($('autoRooms').checked){ roomsTimer=setInterval(refreshRooms, 15000); } }
+
+/* Użytkownicy (REST) */
+$('userSearch').addEventListener('input', ()=> filterUsers());
+function filterUsers(){
+  const q=$('userSearch').value.trim().toLowerCase();
+  document.querySelectorAll('#usersTbody tr').forEach(tr=>{
+    const s = (tr.dataset.name||'')+' '+(tr.dataset.id||'');
+    tr.style.display = s.includes(q)? '' : 'none';
+  });
+}
+async function refreshUsers(){
+  if(!token || !selectedRoom){ $('usersInfo').textContent='Wybierz pokój powyżej.'; $('usersTbody').innerHTML=''; return; }
+  const info=$('usersInfo'); const tbody=$('usersTbody'); info.textContent=''; tbody.innerHTML='';
+  try{
+    const r = await fetch(API_USERS(selectedRoom), { headers: { 'Authorization': 'Bearer '+token } });
+    if(!r.ok){ info.textContent='Błąd: HTTP '+r.status+' (czy endpoint /chat/api/rooms/:room/users jest wdrożony?)'; return; }
+    const j = await r.json();
+    const users = (j.users||[]).sort((a,b)=> (b.msg||0)-(a.msg||0));
+    if(!users.length){ info.textContent='W pokoju brak użytkowników.'; return; }
+    users.forEach(u=>{
+      const tr=document.createElement('tr');
+      tr.dataset.name=(u.name||'').toLowerCase(); tr.dataset.id=u.id||'';
+      tr.innerHTML=`
+        <td title="od: ${fmtTs(u.sinceTs)}">${u.name||'—'}</td>
+        <td><code style="font-size:.85em">${(u.id||'').slice(0,10)}…</code></td>
+        <td title="ostatnio: ${fmtTs(u.lastTs)}">${u.msg??0}</td>
+        <td class="text-end">
+          <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary btn-xxs" data-act="copy">Kopiuj</button>
+            <button class="btn btn-outline-warning btn-xxs" data-act="t5">T:5</button>
+            <button class="btn btn-outline-danger btn-xxs"    data-act="ban">Ban</button>
+            <button class="btn btn-outline-danger btn-xxs"    data-act="purge">Purge</button>
+          </div>
+        </td>`;
+      tr.querySelector('[data-act="copy"]').onclick = ()=>{ $('userId').value=u.id; copyToClipboard(u.id); };
+      tr.querySelector('[data-act="t5"]').onclick   = ()=> sendAdmin({ action:'timeout', userId:u.id, minutes:5, room: selectedRoom });
+      tr.querySelector('[data-act="ban"]').onclick  = ()=> sendAdmin({ action:'ban', userId:u.id, room: selectedRoom });
+      tr.querySelector('[data-act="purge"]').onclick= ()=> sendAdmin({ action:'purge', userId:u.id, room: selectedRoom });
+      tbody.appendChild(tr);
+    });
+    filterUsers();
+  }catch(e){ info.textContent='Błąd: '+e.message; }
+}
+$('refreshUsers').onclick = refreshUsers;
+
+</script>
+</body>
+</html>
