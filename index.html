@@ -73,6 +73,8 @@
       100% { transform: translate(-50%,-160%); opacity:0; }
     }
     html[data-bs-theme="light"] .rx-burst { filter: drop-shadow(0 1px 4px rgba(0,0,0,.15)); }
+    /* klikany nick */
+    .user-name-link{ cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; }
   </style>
 </head>
 <body>
@@ -137,7 +139,7 @@
     <div class="composer">
       <div class="d-flex justify-content-between">
         <div class="hint">Pokój: <span id="roomName">—</span> • Tryb wolny: <span id="slowInfo">wył.</span></div>
-        <div class="hint">Użytkownik: <span id="userName">—</span></div>
+        <div class="hint">Użytkownik: <span id="userName" class="user-name-link" title="Kliknij, aby zmienić nick">—</span></div>
       </div>
       <div class="bar mt-2">
         <button id="emojiBtn" class="btn btn-outline-secondary btn-sm" type="button" title="Emoji">😊</button>
@@ -169,7 +171,25 @@
     </div>
   </div>
 
-  <!-- Admin password modal (pokazywany automatycznie przy 401 z join) -->
+  <!-- Modal: zmiana nicka po wejściu -->
+  <div class="modal fade" id="renameModal" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <form id="renameForm" class="modal-content">
+        <div class="modal-header"><h1 class="modal-title fs-5">Zmień nick</h1></div>
+        <div class="modal-body">
+          <input id="renameInput" type="text" class="form-control" maxlength="40" placeholder="np. AniaK" required>
+          <div id="renameErr" class="text-danger small mt-2" style="display:none"></div>
+          <div class="form-text">Nick jest zapamiętywany lokalnie i używany przy ponownym połączeniu.</div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" type="button" data-bs-dismiss="modal">Anuluj</button>
+          <button class="btn btn-primary" type="submit">Zapisz i połącz ponownie</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Admin password modal -->
   <div class="modal fade" id="adminModal" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
       <form id="adminForm" class="modal-content">
@@ -206,7 +226,9 @@
     const room = (qs.get('room') || localStorage.getItem('chat_room') || 'demo').trim();
     let displayName = (qs.get('nick') || localStorage.getItem('chat_nick') || '').trim();
 
-    let isAdmin = false; // USTAWIAMY dopiero po /join z roli
+    let isAdmin = false; // ustawiane po /join
+    let currentWS = null;
+    let renameInProgress = false;
 
     /* ===== Elements ===== */
     const listEl = document.getElementById('list');
@@ -465,9 +487,36 @@
       };
     });
 
-    /* ===== Nick modal ===== */
+    /* ===== Modale: nick startowy + zmiana nicka ===== */
     const nickModalEl=document.getElementById('nickModal');
     const nickModal = bootstrap.Modal.getOrCreateInstance(nickModalEl, {backdrop:'static',keyboard:false});
+
+    const renameModalEl=document.getElementById('renameModal');
+    const renameModal = bootstrap.Modal.getOrCreateInstance(renameModalEl, {backdrop:'static',keyboard:false});
+    const renameInput = document.getElementById('renameInput');
+    const renameErr   = document.getElementById('renameErr');
+
+    // klik na nazwę użytkownika otwiera modal zmiany nicka
+    userName.addEventListener('click', ()=>{
+      document.getElementById('renameInput').value = displayName || '';
+      renameErr.style.display='none';
+      renameModal.show();
+      queueMicrotask(()=> renameInput?.focus());
+    });
+
+    document.getElementById('renameForm').addEventListener('submit', async (e)=>{
+      e.preventDefault();
+      const v = renameInput.value.trim();
+      if (!v || v === displayName) { renameModal.hide(); return; }
+      renameErr.style.display='none';
+      renameInProgress = true;
+      // ustaw lokalnie + zamknij stare WS + połącz ponownie
+      displayName = v; meName = v; userName.textContent = v;
+      localStorage.setItem('chat_nick', v);
+      try { currentWS?.close(4005, 'rename'); } catch {}
+      await joinAndConnect(); // ewentualne 400 obsłużymy niżej (renameInProgress)
+    });
+
     if(!displayName){
       nickModal.show();
       const nf=document.getElementById('nickForm'); const ni=document.getElementById('nickInput');
@@ -477,10 +526,10 @@
         const v=ni.value.trim(); if(!v){ni.focus();return;}
         displayName=v; localStorage.setItem('chat_nick', v);
         userName.textContent=v; meName=v; nickModal.hide(); joinAndConnect();
-      },{once:true});
+      });
     } else { joinAndConnect(); }
 
-    /* ===== Admin password modal handlers ===== */
+    /* ===== Admin password modal ===== */
     const adminModalEl = document.getElementById('adminModal');
     const adminModal = bootstrap.Modal.getOrCreateInstance(adminModalEl, {backdrop:'static', keyboard:false});
     const adminForm = document.getElementById('adminForm');
@@ -505,10 +554,7 @@
       }
     });
 
-    /* ===== MAIN (JOIN + WS) ===== */
-    let currentWS=null;
-
-    // --- Autoconnect (exponential backoff) ---
+    /* ===== Autoconnect (exponential backoff) ===== */
     let retry = 0;
     function backoffMs(){ return Math.min(30000, 1000 * Math.pow(2, Math.min(6, retry++))); }
     function resetBackoff(){ retry = 0; }
@@ -518,8 +564,8 @@
       setTimeout(()=> joinAndConnect(null, false), d);
     }
 
+    /* ===== MAIN (JOIN + WS) ===== */
     async function joinAndConnect(password=null, fromAdminModal=false){
-      // 1) /join
       let join;
       try{
         const body = { room, displayName };
@@ -539,9 +585,7 @@
             }
             return;
           } else {
-            showError(msg);
-            scheduleReconnect();
-            return;
+            showError(msg); scheduleReconnect(); return;
           }
         }
 
@@ -549,16 +593,21 @@
           let j={}; try{ j = await r.json(); }catch{}
           const msg = (j && j.error) ? j.error : '400';
           if (/nick.*zaj(ę|e)ty/i.test(msg) || /nick.*busy/i.test(msg) || /unique/i.test(msg)) {
-            showError('Ten nick jest zajęty. Wybierz inny.');
-            const ni=document.getElementById('nickInput');
-            ni.value = displayName;
-            userName.textContent='—';
-            bootstrap.Modal.getOrCreateInstance(document.getElementById('nickModal')).show();
+            if (renameInProgress) {
+              renameErr.textContent = 'Ten nick jest zajęty. Wybierz inny.';
+              renameErr.style.display = 'block';
+              renameModal.show();
+              renameInProgress = false;
+            } else {
+              showError('Ten nick jest zajęty. Wybierz inny.');
+              const ni=document.getElementById('nickInput');
+              ni.value = displayName;
+              userName.textContent='—';
+              nickModal.show();
+            }
             return;
           }
-          showError('Błąd: '+msg);
-          scheduleReconnect();
-          return;
+          showError('Błąd: '+msg); scheduleReconnect(); return;
         }
 
         if(!r.ok) throw new Error('API HTTP '+r.status);
@@ -581,17 +630,16 @@
       // zapamiętaj room/nick
       localStorage.setItem('chat_room', room);
       localStorage.setItem('chat_nick', displayName);
+      renameInProgress = false;
 
-      // 1a) rola z API
+      // rola
       if (join.role === 'admin') {
-        isAdmin = true;
-        adminBar.classList.add('show');
+        isAdmin = true;  adminBar.classList.add('show');
       } else {
-        isAdmin = false;
-        adminBar.classList.remove('show');
+        isAdmin = false; adminBar.classList.remove('show');
       }
 
-      // 2) WebSocket
+      // WebSocket
       let ws;
       try{ ws = new WebSocket(WS_URL+'?token='+encodeURIComponent(join.token)); }
       catch(e){ showError('Błąd WebSocket: '+e.message); addSys('Błąd WebSocket.'); setPresence(0,false); scheduleReconnect(); return; }
@@ -663,7 +711,7 @@
         }
       };
 
-      // Admin toolbar actions (PIN/slow/clear) – wysyłane WS-em jako admin
+      // Admin toolbar actions (PIN/slow/clear)
       document.getElementById('pinSend').onclick = ()=>{
         const txt = document.getElementById('pinInput').value.trim();
         if (!txt) return;
