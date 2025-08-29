@@ -61,11 +61,7 @@
     .row-msg:hover .msg-actions{display:flex}
     .msg-actions .btn{--bs-btn-padding-y:.05rem;--bs-btn-padding-x:.25rem;--bs-btn-font-size:.65rem}
     .hidden-live{display:none}
-
-    /* Licznik ukrytych w Top */
     .top-hidden { position:sticky; top:0; z-index:3; text-align:center; margin:-.25rem 0 .25rem; }
-
-    /* FX przy reakcji (burst) */
     .rx-burst {
       position:absolute; pointer-events:none; left:0; top:0; transform:translate(-50%,-100%);
       font-size:18px; opacity:0; filter: drop-shadow(0 2px 6px rgba(0,0,0,.25));
@@ -205,9 +201,11 @@
     const API_URL = ORIGIN + '/chat/api/join';
     const WS_URL  = ORIGIN.replace(/^http/, 'ws') + '/chat/ws';
     const REACTIONS = ['👍','❤️','😂','🎉','👏','🔥'];
+
     const qs = new URLSearchParams(location.search);
-    const room = (qs.get('room') || 'demo').trim();
-    let displayName = (qs.get('nick') || '').trim();
+    const room = (qs.get('room') || localStorage.getItem('chat_room') || 'demo').trim();
+    let displayName = (qs.get('nick') || localStorage.getItem('chat_nick') || '').trim();
+
     let isAdmin = false; // USTAWIAMY dopiero po /join z roli
 
     /* ===== Elements ===== */
@@ -477,7 +475,8 @@
       nf.addEventListener('submit',e=>{
         e.preventDefault();
         const v=ni.value.trim(); if(!v){ni.focus();return;}
-        displayName=v; userName.textContent=v; meName=v; nickModal.hide(); joinAndConnect();
+        displayName=v; localStorage.setItem('chat_nick', v);
+        userName.textContent=v; meName=v; nickModal.hide(); joinAndConnect();
       },{once:true});
     } else { joinAndConnect(); }
 
@@ -499,7 +498,6 @@
         adminModal.hide();
         adminPass.value = '';
       } catch (err) {
-        // joinAndConnect pokaże errory / zrzuci tekst tutaj:
         adminErr.textContent = (err && err.message) ? err.message : 'Błąd logowania';
         adminErr.style.display='block';
       } finally {
@@ -510,6 +508,16 @@
     /* ===== MAIN (JOIN + WS) ===== */
     let currentWS=null;
 
+    // --- Autoconnect (exponential backoff) ---
+    let retry = 0;
+    function backoffMs(){ return Math.min(30000, 1000 * Math.pow(2, Math.min(6, retry++))); }
+    function resetBackoff(){ retry = 0; }
+    function scheduleReconnect(){
+      const d = backoffMs();
+      addSys(`Ponowne połączenie za ${Math.round(d/1000)}s…`);
+      setTimeout(()=> joinAndConnect(null, false), d);
+    }
+
     async function joinAndConnect(password=null, fromAdminModal=false){
       // 1) /join
       let join;
@@ -517,11 +525,10 @@
         const body = { room, displayName };
         if (password) body.password = password;
         const r = await fetch(API_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+
         if (r.status === 401) {
-          // spróbuj odczytać error z JSON
           let j={}; try{ j = await r.json(); }catch{}
           const msg = (j && j.error) ? j.error : '401 Unauthorized';
-          // jeśli dotyczy hasła admina – otwórz modal (chyba że już jesteśmy w modalu)
           if (/admin password/i.test(msg) || /invalid admin password/i.test(msg)) {
             if (!fromAdminModal) {
               adminErr.textContent = /invalid/i.test(msg) ? 'Nieprawidłowe hasło.' : 'Wymagane hasło administratora.';
@@ -530,17 +537,50 @@
             } else {
               throw new Error(/invalid/i.test(msg) ? 'Nieprawidłowe hasło.' : 'Wymagane hasło administratora.');
             }
-            return; // przerwij, czekamy na submit modala
+            return;
           } else {
-            showError(msg); return;
+            showError(msg);
+            scheduleReconnect();
+            return;
           }
         }
+
+        if (r.status === 400) {
+          let j={}; try{ j = await r.json(); }catch{}
+          const msg = (j && j.error) ? j.error : '400';
+          if (/nick.*zaj(ę|e)ty/i.test(msg) || /nick.*busy/i.test(msg) || /unique/i.test(msg)) {
+            showError('Ten nick jest zajęty. Wybierz inny.');
+            const ni=document.getElementById('nickInput');
+            ni.value = displayName;
+            userName.textContent='—';
+            bootstrap.Modal.getOrCreateInstance(document.getElementById('nickModal')).show();
+            return;
+          }
+          showError('Błąd: '+msg);
+          scheduleReconnect();
+          return;
+        }
+
         if(!r.ok) throw new Error('API HTTP '+r.status);
         join = await r.json();
       }catch(e){
-        showError('API błąd: '+(e.message||e)); addSys('Nie udało się pobrać tokenu.'); setPresence(0,false); return;
+        showError('API błąd: '+(e.message||e));
+        addSys('Nie udało się pobrać tokenu.');
+        setPresence(0,false);
+        scheduleReconnect();
+        return;
       }
-      if(!join || !join.token){ showError('API nie zwróciło tokenu'); addSys('API nie zwróciło tokenu.'); setPresence(0,false); return; }
+      if(!join || !join.token){
+        showError('API nie zwróciło tokenu');
+        addSys('API nie zwróciło tokenu.');
+        setPresence(0,false);
+        scheduleReconnect();
+        return;
+      }
+
+      // zapamiętaj room/nick
+      localStorage.setItem('chat_room', room);
+      localStorage.setItem('chat_nick', displayName);
 
       // 1a) rola z API
       if (join.role === 'admin') {
@@ -554,11 +594,11 @@
       // 2) WebSocket
       let ws;
       try{ ws = new WebSocket(WS_URL+'?token='+encodeURIComponent(join.token)); }
-      catch(e){ showError('Błąd WebSocket: '+e.message); addSys('Błąd WebSocket.'); setPresence(0,false); return; }
+      catch(e){ showError('Błąd WebSocket: '+e.message); addSys('Błąd WebSocket.'); setPresence(0,false); scheduleReconnect(); return; }
       currentWS=ws;
 
-      ws.onopen = ()=>{ addSys('Połączono.'); setPresence(1,true); scrollToBottom(); };
-      ws.onclose= ()=>{ addSys('Rozłączono.'); setPresence(0,false); typingMap.clear(); typingEl.textContent=''; };
+      ws.onopen = ()=>{ addSys('Połączono.'); setPresence(1,true); scrollToBottom(); resetBackoff(); };
+      ws.onclose= ()=>{ addSys('Rozłączono.'); setPresence(0,false); typingMap.clear(); typingEl.textContent=''; scheduleReconnect(); };
       ws.onerror= ()=>{ showError('Błąd WebSocket.'); };
 
       ws.onmessage = (ev)=>{
@@ -621,6 +661,23 @@
           if(m.action==='timeout'){ timeouts.set(m.userId, Date.now()+(m.minutes||5)*60*1000); hideUser(m.userId); }
           if(m.action==='clear'){ listEl.innerHTML=''; }
         }
+      };
+
+      // Admin toolbar actions (PIN/slow/clear) – wysyłane WS-em jako admin
+      document.getElementById('pinSend').onclick = ()=>{
+        const txt = document.getElementById('pinInput').value.trim();
+        if (!txt) return;
+        try { currentWS?.send(JSON.stringify({type:'admin', action:'announce', text: txt})); } catch {}
+      };
+      document.getElementById('clearBtn').onclick = ()=>{
+        try { currentWS?.send(JSON.stringify({type:'admin', action:'clear'})); } catch {}
+      };
+      document.getElementById('slowSelect').onchange = ()=>{
+        const v = document.getElementById('slowSelect').value;
+        try { currentWS?.send(JSON.stringify({type:'admin', action:'slow', value: v})); } catch {}
+        slow = v.toLowerCase();
+        slowMs = slow.endsWith('s') ? Math.max(0, parseInt(slow)*1000|0) : 0;
+        slowInfo.textContent = slowMs ? (slowMs/1000)+' s' : 'wył.';
       };
 
       // send
