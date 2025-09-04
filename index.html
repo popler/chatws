@@ -73,7 +73,6 @@
       100% { transform: translate(-50%,-160%); opacity:0; }
     }
     html[data-bs-theme="light"] .rx-burst { filter: drop-shadow(0 1px 4px rgba(0,0,0,.15)); }
-    /* klikany nick */
     .user-name-link{ cursor:pointer; text-decoration:underline dotted; text-underline-offset:2px; }
   </style>
 </head>
@@ -220,13 +219,80 @@
     const ORIGIN  = 'https://relay.popler.tv';
     const API_URL = ORIGIN + '/chat/api/join';
     const WS_URL  = ORIGIN.replace(/^http/, 'ws') + '/chat/ws';
+    const VERIFY  = '/chat/api/verify.php'; // lokalna weryfikacja HS256
     const REACTIONS = ['👍','❤️','😂','🎉','👏','🔥'];
+
+    // === JWT helpers (panel SSO) ===
+    function b64urlToJson(segment){
+      try{
+        segment = segment.replace(/-/g,'+').replace(/_/g,'/');
+        const pad = segment.length % 4; if (pad) segment += '='.repeat(4-pad);
+        return JSON.parse(atob(segment));
+      }catch{ return null; }
+    }
+    function decodeJwtNoVerify(jwt){
+      if(!jwt) return null;
+      const parts = jwt.split('.');
+      if(parts.length !== 3) return null;
+      const header = b64urlToJson(parts[0]);
+      const claims = b64urlToJson(parts[1]);
+      return { header, claims };
+    }
+    function escapeRegExp(s) {
+      return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+    // === Stub: onWsMessage, żeby NIGDY nie waliło błędem ===
+    window.onWsMessage = window.onWsMessage || function(payload){ /* no-op, panel może nas nasłuchiwać */ };
 
     const qs = new URLSearchParams(location.search);
     const room = (qs.get('room') || localStorage.getItem('chat_room') || 'demo').trim();
     let displayName = (qs.get('nick') || localStorage.getItem('chat_nick') || '').trim();
 
-    let isAdmin = false; // ustawiane po /join
+    // Token w URL?
+    const tokenFromUrl = (qs.get('token') || '').trim();
+    let token = null;
+    let tokenMode = false;
+    if (tokenFromUrl) {
+      const dec = decodeJwtNoVerify(tokenFromUrl);
+      if (dec && dec.claims) {
+        if (dec.claims.name) displayName = dec.claims.name;
+        token = tokenFromUrl;
+        tokenMode = true;
+      }
+    }
+
+    // Możliwy token z panelu przez postMessage (łagodne, z timeoutem)
+    function askParentForToken(roomName, timeoutMs=1500){
+      return new Promise((resolve)=>{
+        if (!window.parent || window.parent === window) return resolve(null);
+        let done = false;
+        const onMsg = (e)=>{
+          try{
+            const d = e.data;
+            if (!d || typeof d !== 'object') return;
+            if (d.type === 'chat:token' && (!d.room || d.room === roomName)) {
+              done = true;
+              window.removeEventListener('message', onMsg);
+              resolve(d.token || null);
+            }
+          }catch{}
+        };
+        window.addEventListener('message', onMsg);
+        try { window.parent.postMessage({ type:'chat:getToken', room: roomName }, '*'); } catch {}
+        setTimeout(()=>{ if(!done){ window.removeEventListener('message', onMsg); resolve(null); } }, timeoutMs);
+      });
+    }
+
+    async function verifyToken(tkn){
+      try{
+        const r = await fetch(VERIFY + '?token=' + encodeURIComponent(tkn), { headers:{'Accept':'application/json'} });
+        if(!r.ok) return null;
+        const j = await r.json();
+        return (j && j.ok) ? j : null;
+      }catch{ return null; }
+    }
+
+    let isAdmin = false; // ustawiane po /join albo z claims
     let currentWS = null;
     let renameInProgress = false;
 
@@ -273,12 +339,15 @@
     if (pinFromUrl) { pinText.textContent = pinFromUrl; pinWrap.style.display='block'; }
     function showError(msg){ toastBody.textContent = msg; toast.show(); }
     function fmtTime(ts){ try{ const d=new Date(ts); return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}); } catch{ return '' } }
-    function escapeHtml(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-
+    function escapeHtml(s){
+    return s.replace(/[&<>"]/g, (c) => (
+      {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]
+    ));
+  }
     /* Emoji + mentions */
     let meName = displayName;
     const emoticonMap=new Map([[":-)","😊"],[":)","😊"],[":-D","😄"],[":D","😄"],[":-(","🙁"],[":(","🙁"],[";-)","😉"],[";)","😉"],[":-P","😛"],[":P","😛"],[":-o","😮"],[":o","😮"],[":-|","😐"],[":|","😐"],[":-/","😕"],[":/","😕"],[":*","😘"],["<3","❤️"]]);
-    const shortcodeMap={":heart:":"❤️",":thumbsup:":"👍",":thumbsdown":"👎",":fire:":"🔥",":clap:":"👏",":tada:":"🎉",":star:":"⭐",":100:":"💯",":smile:":"😄",":grin:":"😁",":joy:":"😂",":sob:":"😭",":wink:":"😉",":blush:":"😊",":thinking:":"🤔",":wave:":"👋",":ok:":"👌",":pray:":"🙏",":muscle:":"💪",":eyes:":"👀"};
+    const shortcodeMap={":heart:":"❤️",":thumbsup:":"👍",":thumbsdown":"👎",":fire:":"🔥",":clap:":"👏",":tada:":"🎉",":star":"⭐",":100:":"💯",":smile:":"😄",":grin:":"😁",":joy:":"😂",":sob:":"😭",":wink:":"😉",":blush:":"😊",":thinking:":"🤔",":wave:":"👋",":ok:":"👌",":pray:":"🙏",":muscle:":"💪",":eyes:":"👀"};
     function emojify(t){ if(!t) return t; t=t.replace(/:[a-z0-9_]+:/gi,m=>shortcodeMap[m.toLowerCase()]||m); const sorted=[...emoticonMap.keys()].sort((a,b)=>b.length-a.length); for(const k of sorted){ const re=new RegExp(k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'g'); t=t.replace(re, emoticonMap.get(k)); } return t; }
     function renderMentions(text){
       if (meName) {
@@ -318,7 +387,8 @@
     /* Typing */
     const typingMap=new Map(); const TYPING_TTL=3000;
     function updateTyping(){ const now=Date.now(); let names=[]; for(const [uid,meta] of typingMap){ if(now-meta.ts>TYPING_TTL) { typingMap.delete(uid); continue; } if(meta.name) names.push(meta.name); } typingEl.textContent = names.length? (names.length===1?`${names[0]} pisze…` : names.length===2?`${names[0]} i ${names[1]} piszą…` : `${names[0]} i ${names.length-1} innych piszą…`) : ''; }
-    let lastTypingSent=0; function maybeSendTyping(ws){ const now=Date.now(); if(now-lastTypingSent<1000) return; lastTypingSent=now; try{ ws.send(JSON.stringify({type:'typing'})); }catch{} }
+    let lastTypingSent=0;
+    function maybeSendTyping(){ const now=Date.now(); if(now-lastTypingSent<1000) return; lastTypingSent=now; safeSend({type:'typing'}); }
 
     /* Slow mode (frontend + admin wysyła do backendu) */
     let slow = (qs.get('slow') || 'off').toLowerCase();
@@ -420,7 +490,7 @@
       cntEl.textContent = v? String(v) : '';
       if(v===0) pill.remove();
       ensureAdd(bar);
-      try{ currentWS?.send(JSON.stringify({type:'reaction', id, emoji:emo, delta:had?-1:+1})); }catch{}
+      safeSend({type:'reaction', id, emoji:emo, delta: had ? -1 : +1});
       const bubble = bar.previousElementSibling || bar; burstAt(bubble, emo);
     }
     function applyReactionToRow(row, emo, delta){
@@ -510,11 +580,12 @@
       if (!v || v === displayName) { renameModal.hide(); return; }
       renameErr.style.display='none';
       renameInProgress = true;
-      // ustaw lokalnie + zamknij stare WS + połącz ponownie
       displayName = v; meName = v; userName.textContent = v;
       localStorage.setItem('chat_nick', v);
       try { currentWS?.close(4005, 'rename'); } catch {}
-      await joinAndConnect(); // ewentualne 400 obsłużymy niżej (renameInProgress)
+      await joinAndConnect(); // ewentualne 400 obsłużymy niżej
+      renameModal.hide();
+      renameInProgress = false;
     });
 
     if(!displayName){
@@ -527,7 +598,7 @@
         displayName=v; localStorage.setItem('chat_nick', v);
         userName.textContent=v; meName=v; nickModal.hide(); joinAndConnect();
       });
-    } else { joinAndConnect(); }
+    }
 
     /* ===== Admin password modal ===== */
     const adminModalEl = document.getElementById('adminModal');
@@ -564,8 +635,108 @@
       setTimeout(()=> joinAndConnect(null, false), d);
     }
 
+    /* ===== Bezpieczne wysyłanie przez WS ===== */
+    function safeSend(obj){
+      if (currentWS && currentWS.readyState === WebSocket.OPEN) {
+        try { currentWS.send(JSON.stringify(obj)); } catch {}
+      }
+    }
+
+    /* ===== WSPÓLNY handler WS dla obu trybów ===== */
+    function handleWsMessage(ev){
+      let m; try{ m=JSON.parse(ev.data) }catch{ return; }
+      if(m.type==='hello'){ setPresence(m.occupants??1,true); return; }
+      if(m.type==='presence'){ setPresence(m.occupants??1,true); return; }
+      if(m.type==='typing'){
+        if(m.user && m.user.id){
+          typingMap.set(m.user.id,{ts:Date.now(),name:m.user.name||'Ktoś'});
+          setTimeout(()=>{ const v=typingMap.get(m.user.id); if(!v) return; if(Date.now()-v.ts>=TYPING_TTL){ typingMap.delete(m.user.id); updateTyping(); } }, TYPING_TTL+150);
+          updateTyping();
+        }
+        return;
+      }
+      if(m.type==='history'){
+        (m.items||[]).forEach(x=>{
+          if(markSeen(x.id)) return;
+          const uid = x.user?.id || '';
+          if (bans.has(uid) || shadowBans.has(uid)) return;
+          const until = timeouts.get(uid); if (until && Date.now() < until) return;
+
+          const txt = emojify(x.text);
+          let hidden=false;
+          if (chatMode==='top'){ hidden = scoreMessage(uid, txt) < 0; }
+          const row = renderRow({id:x.id,user:x.user?.name||'Anon',userId:uid,text:txt,ts:x.ts,hidden});
+          if (meName) {
+           const reMention = new RegExp('(^|\\s)@' + escapeRegExp(meName) + '(\\b)', 'i');
+           if (reMention.test(x.text)) {
+             row.querySelector('.text').classList.add('mention-me');
+           }
+         }
+       });
+        follow=true; scrollToBottom(); resetUnread(); resetHidden();
+        return;
+      }
+      if(m.type==='message'){
+        if(markSeen(m.id)) return;
+        const uid = m.user?.id || '';
+        if (bans.has(uid) || shadowBans.has(uid)) return;
+        const until = timeouts.get(uid); if (until && Date.now() < until) return;
+
+        const txt = emojify(m.text);
+        let hidden=false;
+        if (chatMode==='top'){ hidden = scoreMessage(uid, txt) < 0; }
+        const row=renderRow({id:m.id,user:m.user?.name||'Anon',userId:uid,text:txt,ts:m.ts,hidden});
+        if (meName) {
+         const reMention = new RegExp('(^|\\s)@' + escapeRegExp(meName) + '(\\b)', 'i');
+         if (reMention.test(x.text)) {
+           row.querySelector('.text').classList.add('mention-me');
+         }
+       }        return;
+      }
+      if(m.type==='reaction'){
+        const row=listEl.querySelector(`.row-msg[data-id="${m.id}"]`);
+        if(row && m.emoji && typeof m.delta==='number') {
+          applyReactionToRow(row, m.emoji, m.delta);
+          if (m.delta > 0) {
+            const bubble = row.querySelector('.text');
+            burstAt(bubble, m.emoji);
+          }
+        }
+        return;
+      }
+      if(m.type==='announce'){ if(m.text){ pinText.textContent=m.text; pinWrap.style.display='block'; } return; }
+      if(m.type==='moderate'){
+        if(m.action==='delete'){ listEl.querySelector(`.row-msg[data-id="${m.id}"]`)?.remove(); }
+        if(m.action==='purge'){ hideUser(m.userId); }
+        if(m.action==='ban'){ bans.add(m.userId); hideUser(m.userId); }
+        if(m.action==='timeout'){ timeouts.set(m.userId, Date.now()+(m.minutes||5)*60*1000); hideUser(m.userId); }
+        if(m.action==='clear'){ listEl.innerHTML=''; }
+      }
+    }
+
     /* ===== MAIN (JOIN + WS) ===== */
     async function joinAndConnect(password=null, fromAdminModal=false){
+      // Try token-mode (URL or from parent)
+      if (tokenMode && token) {
+        // weryfikuj lokalnie HS256 (łagodnie – jeśli padnie, fallback do join)
+        const v = await verifyToken(token);
+        if (!v) {
+          // token zły – spróbuj zwykłego join
+        } else {
+          // rola z tokena?
+          if (v.role === 'admin') { isAdmin = true; adminBar.classList.add('show'); }
+          else { isAdmin = false; adminBar.classList.remove('show'); }
+
+          try{ currentWS = new WebSocket(WS_URL+'?token='+encodeURIComponent(token)); }
+          catch(e){ showError('Błąd WebSocket: '+e.message); addSys('Socket error'); setPresence(0,false); scheduleReconnect(); return; }
+          currentWS.onopen   = ()=>{ addSys('Połączono.'); setPresence(1,true); scrollToBottom(); resetBackoff(); };
+          currentWS.onclose  = ()=>{ addSys('Rozłączono.'); setPresence(0,false); typingMap.clear(); typingEl.textContent=''; scheduleReconnect(); };
+          currentWS.onerror  = ()=>{ showError('Błąd WebSocket.'); };
+          currentWS.onmessage= handleWsMessage;
+          return;
+        }
+      }
+
       let join;
       try{
         const body = { room, displayName };
@@ -595,7 +766,7 @@
           if (/nick.*zaj(ę|e)ty/i.test(msg) || /nick.*busy/i.test(msg) || /unique/i.test(msg)) {
             if (renameInProgress) {
               renameErr.textContent = 'Ten nick jest zajęty. Wybierz inny.';
-              renameErr.style.display = 'block';
+              renameErr.style.display='block';
               renameModal.show();
               renameInProgress = false;
             } else {
@@ -627,7 +798,6 @@
         return;
       }
 
-      // zapamiętaj room/nick
       localStorage.setItem('chat_room', room);
       localStorage.setItem('chat_nick', displayName);
       renameInProgress = false;
@@ -639,90 +809,25 @@
         isAdmin = false; adminBar.classList.remove('show');
       }
 
-      // WebSocket
-      let ws;
-      try{ ws = new WebSocket(WS_URL+'?token='+encodeURIComponent(join.token)); }
+      // WS
+      try{ currentWS = new WebSocket(WS_URL+'?token='+encodeURIComponent(join.token)); }
       catch(e){ showError('Błąd WebSocket: '+e.message); addSys('Błąd WebSocket.'); setPresence(0,false); scheduleReconnect(); return; }
-      currentWS=ws;
 
-      ws.onopen = ()=>{ addSys('Połączono.'); setPresence(1,true); scrollToBottom(); resetBackoff(); };
-      ws.onclose= ()=>{ addSys('Rozłączono.'); setPresence(0,false); typingMap.clear(); typingEl.textContent=''; scheduleReconnect(); };
-      ws.onerror= ()=>{ showError('Błąd WebSocket.'); };
+      currentWS.onopen = ()=>{ addSys('Połączono.'); setPresence(1,true); scrollToBottom(); resetBackoff(); };
+      currentWS.onclose= ()=>{ addSys('Rozłączono.'); setPresence(0,false); typingMap.clear(); typingEl.textContent=''; scheduleReconnect(); };
+      currentWS.onerror= ()=>{ showError('Błąd WebSocket.'); };
+      currentWS.onmessage = handleWsMessage;
 
-      ws.onmessage = (ev)=>{
-        let m; try{ m=JSON.parse(ev.data) }catch{ return }
-        if(m.type==='hello'){ setPresence(m.occupants??1,true); return; }
-        if(m.type==='presence'){ setPresence(m.occupants??1,true); return; }
-        if(m.type==='typing'){
-          if(m.user && m.user.id){
-            typingMap.set(m.user.id,{ts:Date.now(),name:m.user.name||'Ktoś'});
-            setTimeout(()=>{ const v=typingMap.get(m.user.id); if(!v) return; if(Date.now()-v.ts>=TYPING_TTL){ typingMap.delete(m.user.id); updateTyping(); } }, TYPING_TTL+150);
-            updateTyping();
-          }
-          return;
-        }
-        if(m.type==='history'){
-          (m.items||[]).forEach(x=>{
-            if(markSeen(x.id)) return;
-            const uid = x.user?.id || '';
-            if (bans.has(uid) || shadowBans.has(uid)) return;
-            const until = timeouts.get(uid); if (until && Date.now() < until) return;
-
-            const txt = emojify(x.text);
-            let hidden=false;
-            if (chatMode==='top'){ hidden = scoreMessage(uid, txt) < 0; }
-            const row = renderRow({id:x.id,user:x.user?.name||'Anon',userId:uid,text:txt,ts:x.ts,hidden});
-            if(meName && new RegExp(`(^|\\s)@${meName.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}(\\b)`,'i').test(x.text)){ row.querySelector('.text').classList.add('mention-me'); }
-          });
-          follow=true; scrollToBottom(); resetUnread(); resetHidden();
-          return;
-        }
-        if(m.type==='message'){
-          if(markSeen(m.id)) return;
-          const uid = m.user?.id || '';
-          if (bans.has(uid) || shadowBans.has(uid)) return;
-          const until = timeouts.get(uid); if (until && Date.now() < until) return;
-
-          const txt = emojify(m.text);
-          let hidden=false;
-          if (chatMode==='top'){ hidden = scoreMessage(uid, txt) < 0; }
-          const row=renderRow({id:m.id,user:m.user?.name||'Anon',userId:uid,text:txt,ts:m.ts,hidden});
-          if(meName && new RegExp(`(^|\\s)@${meName.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')}(\\b)`,'i').test(m.text)){ row.querySelector('.text').classList.add('mention-me'); }
-          return;
-        }
-        if(m.type==='reaction'){
-          const row=listEl.querySelector(`.row-msg[data-id="${m.id}"]`);
-          if(row && m.emoji && typeof m.delta==='number') {
-            applyReactionToRow(row, m.emoji, m.delta);
-            if (m.delta > 0) {
-              const bubble = row.querySelector('.text');
-              burstAt(bubble, m.emoji);
-            }
-          }
-          return;
-        }
-        if(m.type==='announce'){ if(m.text){ pinText.textContent=m.text; pinWrap.style.display='block'; } return; }
-        if(m.type==='moderate'){
-          if(m.action==='delete'){ listEl.querySelector(`.row-msg[data-id="${m.id}"]`)?.remove(); }
-          if(m.action==='purge'){ hideUser(m.userId); }
-          if(m.action==='ban'){ bans.add(m.userId); hideUser(m.userId); }
-          if(m.action==='timeout'){ timeouts.set(m.userId, Date.now()+(m.minutes||5)*60*1000); hideUser(m.userId); }
-          if(m.action==='clear'){ listEl.innerHTML=''; }
-        }
-      };
-
-      // Admin toolbar actions (PIN/slow/clear)
+      // Admin toolbar -> safeSend
       document.getElementById('pinSend').onclick = ()=>{
         const txt = document.getElementById('pinInput').value.trim();
         if (!txt) return;
-        try { currentWS?.send(JSON.stringify({type:'admin', action:'announce', text: txt})); } catch {}
+        safeSend({type:'admin', action:'announce', text: txt});
       };
-      document.getElementById('clearBtn').onclick = ()=>{
-        try { currentWS?.send(JSON.stringify({type:'admin', action:'clear'})); } catch {}
-      };
+      document.getElementById('clearBtn').onclick = ()=> safeSend({type:'admin', action:'clear'});
       document.getElementById('slowSelect').onchange = ()=>{
         const v = document.getElementById('slowSelect').value;
-        try { currentWS?.send(JSON.stringify({type:'admin', action:'slow', value: v})); } catch {}
+        safeSend({type:'admin', action:'slow', value: v});
         slow = v.toLowerCase();
         slowMs = slow.endsWith('s') ? Math.max(0, parseInt(slow)*1000|0) : 0;
         slowInfo.textContent = slowMs ? (slowMs/1000)+' s' : 'wył.';
@@ -732,12 +837,12 @@
       function sendNow(){
         let text=input.value.trim(); if(!text) return; if(!canSend()) return;
         text = emojify(text);
-        try{ ws.send(JSON.stringify({type:'message', text})); input.value=''; autoGrow(); afterSend(); }
-        catch(e){ showError('Nie udało się wysłać: '+e.message); }
+        safeSend({type:'message', text});
+        input.value=''; autoGrow(); afterSend();
       }
       sendBtn.onclick=sendNow;
-      input.addEventListener('keydown',(e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendNow(); return; } queueMicrotask(()=>maybeSendTyping(ws)); });
-      input.addEventListener('input',()=>maybeSendTyping(ws));
+      input.addEventListener('keydown',(e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendNow(); return; } queueMicrotask(()=>maybeSendTyping()); });
+      input.addEventListener('input',()=>maybeSendTyping());
     }
 
     function addSys(t){ const d=document.createElement('div'); d.className='row-msg'; d.innerHTML = `<div class="avatar"></div><div class="msg-col"><div class="text" style="color:var(--yt-sub)">${escapeHtml(t)}</div></div>`; listEl.appendChild(d); if(follow) scrollToBottom(); }
@@ -750,7 +855,6 @@
       const near = nearBottom();
       const row = document.createElement('div'); row.className='row-msg'; row.dataset.id=id||''; row.dataset.uid=userId||'';
 
-      // jeśli Top i ukryte – nie pokazuj, ale zlicz
       if (chatMode==='top' && hidden) {
         row.classList.add('hidden-live');
         row.style.display = 'none';
@@ -785,9 +889,9 @@
         `;
         const [btnHide, btn5, btnBan, btnDel] = actions.querySelectorAll('button');
         btnHide.onclick=()=>{ shadowBans.add(userId); row.remove(); };
-        btn5.onclick=()=>{ timeouts.set(userId, Date.now()+5*60*1000); try{ currentWS?.send(JSON.stringify({type:'admin', action:'timeout', userId, minutes:5 })); }catch{} row.remove(); };
-        btnBan.onclick=()=>{ bans.add(userId); try{ currentWS?.send(JSON.stringify({type:'admin', action:'ban', userId })); }catch{} row.remove(); };
-        btnDel.onclick=()=>{ row.remove(); try{ currentWS?.send(JSON.stringify({type:'admin', action:'delete', id })); }catch{} };
+        btn5.onclick=()=>{ timeouts.set(userId, Date.now()+5*60*1000); safeSend({type:'admin', action:'timeout', userId, minutes:5 }); row.remove(); };
+        btnBan.onclick=()=>{ bans.add(userId); safeSend({type:'admin', action:'ban', userId }); row.remove(); };
+        btnDel.onclick=()=>{ row.remove(); safeSend({type:'admin', action:'delete', id }); };
         row.appendChild(actions);
       }
 
@@ -816,10 +920,10 @@
         <button class="dropdown-item text-danger">Usuń wszystkie wiadomości</button>
       `;
       const [b5, bBan, bShadow, bPurge] = menu.querySelectorAll('.dropdown-item');
-      b5.onclick=()=>{ timeouts.set(uid, Date.now()+5*60*1000); try{ currentWS?.send(JSON.stringify({type:'admin', action:'timeout', userId:uid, minutes:5 })); }catch{} close(); };
-      bBan.onclick=()=>{ bans.add(uid); try{ currentWS?.send(JSON.stringify({type:'admin', action:'ban', userId:uid })); }catch{} close(); hideUser(uid); };
+      b5.onclick=()=>{ timeouts.set(uid, Date.now()+5*60*1000); safeSend({type:'admin', action:'timeout', userId:uid, minutes:5 }); close(); };
+      bBan.onclick=()=>{ bans.add(uid); safeSend({type:'admin', action:'ban', userId:uid }); close(); hideUser(uid); };
       bShadow.onclick=()=>{ shadowBans.add(uid); close(); hideUser(uid); };
-      bPurge.onclick=()=>{ document.querySelectorAll(`.row-msg[data-uid="${uid}"]`).forEach(n=>n.remove()); try{ currentWS?.send(JSON.stringify({type:'admin', action:'purge', userId:uid })); }catch{} close(); };
+      bPurge.onclick=()=>{ document.querySelectorAll(`.row-msg[data-uid="${uid}"]`).forEach(n=>n.remove()); safeSend({type:'admin', action:'purge', userId:uid }); close(); };
 
       function close(){ menu.remove(); document.removeEventListener('click', onDoc, true); }
       function onDoc(ev){ if(!menu.contains(ev.target)) close(); }
@@ -827,6 +931,32 @@
       document.body.appendChild(menu);
     }
     function hideUser(uid){ document.querySelectorAll(`.row-msg[data-uid="${uid}"]`).forEach(n=>n.remove()); }
+
+    /* ===== Start: spróbuj tokenu z rodzica, jeśli nie ma w URL ===== */
+    (async function boot(){
+      if (!displayName) {
+        // pokaż modal nicku i dopiero potem join
+        // (joinAndConnect zostanie wywołane po zatwierdzeniu nicku)
+      } else {
+        // jeśli brak tokenu w URL -> poproś panel
+        if (!tokenMode || !token) {
+          const t = await askParentForToken(room, 1200);
+          if (t) {
+            token = t; tokenMode = true;
+          }
+        }
+        // jeśli jest token z panelu – od razu próbuj
+        if (tokenMode && token) {
+          await joinAndConnect();
+          return;
+        }
+        // w przeciwnym razie – standardowo (nick modal mógł już się pojawić)
+        if (displayName) joinAndConnect();
+      }
+    })();
+
+    /* Już miałeś: podpięcie modali/zdarzeń – reszta pliku jak wyżej */
+
   });
   </script>
 </body>

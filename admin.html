@@ -17,7 +17,13 @@
     .table-fixed thead, .table-fixed tbody tr{ display:table; width:100%; table-layout:fixed; }
     .table-sm th, .table-sm td{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .room-row.active{ background:var(--bs-tertiary-bg); }
+
+    /* W trybie autologowania tokenem schowaj pola hasła i przycisk Połącz do czasu zakończenia */
+    .chat-autologin #pass,
+    .chat-autologin #togglePass,
+    .chat-autologin #connect { display:none !important; }
   </style>
+
 </head>
 <body>
 <div class="container" style="max-width:1100px">
@@ -228,19 +234,20 @@ const API_USERS= (room)=> ORIGIN + '/chat/api/rooms/' + encodeURIComponent(room)
 const API_LOGCSV = ORIGIN + '/chat/api/admin/log.csv';
 const WS_URL   = ORIGIN.replace(/^http/,'ws') + '/chat/ws';
 
-let token=null, ws=null, room=null;
-let auditTimer=null, roomsTimer=null;
-let selectedRoom=null;
-
+/* === Helpery i elementy – MUSZĄ być zdefiniowane PRZED autologowaniem === */
 const $ = (id)=>document.getElementById(id);
-const statusEl = $('status'), presenceEl=$('presence'), dotEl=$('dot'), wsLogEl=$('wsLog');
+const statusEl   = $('status');
+const presenceEl = $('presence');
+const dotEl      = $('dot');
+const wsLogEl    = $('wsLog');
 
-function showStatus(s){ statusEl.textContent = s; }
+function showStatus(s){ if(statusEl) statusEl.textContent = s; }
 function setPresence(n, online){
-  presenceEl.textContent = online ? `${n} online` : 'offline';
-  dotEl.style.background = online ? '#31c24b' : '#aaa';
+  if (presenceEl) presenceEl.textContent = online ? `${n} online` : 'offline';
+  if (dotEl) dotEl.style.background = online ? '#31c24b' : '#aaa';
 }
 function appendWsLog(line){
+  if (!wsLogEl) return;
   const now = new Date().toISOString().replace('T',' ').slice(0,19);
   const txt = `[${now}] ${line}\n`;
   wsLogEl.textContent = (wsLogEl.textContent || '') + txt;
@@ -256,17 +263,121 @@ $('btnDark').onclick  = ()=>document.documentElement.setAttribute('data-bs-theme
 /* Pamiętaj ostatni room/nick (nie hasło) */
 (function restoreSaved(){
   const qs=new URLSearchParams(location.search);
-  $('room').value = qs.get('room') || localStorage.getItem('adm_room') || 'demo';
-  $('nick').value = qs.get('nick') || localStorage.getItem('adm_nick') || '';
+  if ($('room')) $('room').value = qs.get('room') || localStorage.getItem('adm_room') || 'demo';
+  if ($('nick')) $('nick').value = qs.get('nick') || localStorage.getItem('adm_nick') || '';
 })();
-function saveCreds(){ localStorage.setItem('adm_room',$('room').value.trim()); localStorage.setItem('adm_nick',$('nick').value.trim()); }
+function saveCreds(){
+  if ($('room')) localStorage.setItem('adm_room',$('room').value.trim());
+  if ($('nick')) localStorage.setItem('adm_nick',$('nick').value.trim());
+}
 
-/* Show/Hide hasło + kopiuj */
-$('togglePass').onclick = ()=>{ const inp=$('pass'); inp.type = (inp.type==='password') ? 'text' : 'password'; };
+/* Pokaż/ukryj hasło + kopiuj */
+$('togglePass').onclick = ()=>{ const inp=$('pass'); if(!inp) return; inp.type = (inp.type==='password') ? 'text' : 'password'; };
 $('copyUserId').onclick = ()=>{ const v=$('userId').value.trim(); if(v) copyToClipboard(v); };
 $('copyMsgId').onclick  = ()=>{ const v=$('msgId').value.trim(); if(v) copyToClipboard(v); };
 
-/* Połącz (join + WS) */
+/* ===== Panel SSO via JWT (token w URL) ===== */
+function b64urlToJson(segment){
+  try{
+    segment = segment.replace(/-/g,'+').replace(/_/g,'/');
+    const pad = segment.length % 4; if (pad) segment += '='.repeat(4-pad);
+    return JSON.parse(atob(segment));
+  }catch{ return null; }
+}
+function decodeJwtNoVerify(jwt){
+  if(!jwt) return null;
+  const parts = jwt.split('.');
+  if(parts.length !== 3) return null;
+  const header = b64urlToJson(parts[0]);
+  const claims = b64urlToJson(parts[1]);
+  return { header, claims };
+}
+
+// Bezpieczny stub (gasi "onWsMessage is not defined")
+window.onWsMessage = window.onWsMessage || function (payload) {
+  try { console.debug('[chat:onWsMessage]', typeof payload === 'string' ? JSON.parse(payload) : payload); }
+  catch { console.debug('[chat:onWsMessage:raw]', payload); }
+};
+
+let token=null, ws=null, room=null;
+
+// 1) Auto-connect z weryfikacją tokena
+(function(){
+  try{
+    const qs = new URLSearchParams(location.search);
+    const t  = (qs.get('token')||'').trim();
+    const r  = (qs.get('room')||'').trim();
+    if (!t || !r) return; // brak tokenu → standardowy tryb (formularz hasła)
+
+    token = t; room = r;
+    if ($('room')) $('room').value = room;
+    if ($('nick') && !$('nick').value) $('nick').value = 'Admin';
+
+    // ukryj pola hasła i przycisk, pokaż stan
+    document.documentElement.classList.add('chat-autologin');
+    showStatus('Token z panelu – weryfikacja…');
+
+    // 1a) weryfikacja tokenu (HS256) po backendzie
+    fetch('/chat/api/verify.php?token=' + encodeURIComponent(token), {
+      method: 'GET', headers: { 'Accept': 'application/json' }
+    })
+    .then(res => { if(!res.ok) throw new Error('HTTP '+res.status); return res.json(); })
+    .then(j => {
+      if (!j || !j.ok) throw new Error(j && j.error || 'verify_failed');
+
+      // token może zawierać właściwą nazwę pokoju – użyj jej
+      if (j.room && j.room !== room) {
+        room = j.room;
+        if ($('room')) $('room').value = room;
+      }
+
+      // 1b) łączymy po WS; jeśli backend wymaga też &room= – dodaj
+      showStatus('Token OK – łączenie do WS…');
+      try {
+        ws = new WebSocket(WS_URL + '?token=' + encodeURIComponent(token));
+      } catch (e) {
+        showStatus('WS init error: ' + e.message);
+        document.documentElement.classList.remove('chat-autologin');
+        return;
+      }
+
+      ws.onopen = () => {
+        showStatus('WS połączone (admin).');
+        if ($('controls')) $('controls').style.display='block';
+        setPresence(1,true);
+        appendWsLog('WS OPEN (token)');
+      };
+
+      ws.onclose = () => {
+        showStatus('WS rozłączone.');
+        setPresence(0,false);
+        appendWsLog('WS CLOSE');
+      };
+
+      ws.onerror = (e) => {
+        showStatus('WS błąd.');
+        appendWsLog('WS ERROR');
+      };
+
+      ws.onmessage = (ev) => {
+        appendWsLog('WS MSG: ' + ev.data.slice(0,200));
+        try { window.onWsMessage && window.onWsMessage(ev.data); } catch(_) {}
+      };
+
+    })
+    .catch(err => {
+      console.warn('[jwt-autologin] fallback do formularza:', err && err.message);
+      showStatus('Nie udało się zweryfikować tokenu. Podaj hasło admina i Połącz.');
+      document.documentElement.classList.remove('chat-autologin');
+    });
+
+  }catch(e){
+    console.warn('[jwt-autologin] wyjątek IIFE:', e);
+    document.documentElement.classList.remove('chat-autologin');
+  }
+})();
+
+/* Połącz (join + WS) – tryb hasło */
 $('connect').onclick = async ()=>{
   room = $('room').value.trim();
   const displayName = $('nick').value.trim();
@@ -384,6 +495,14 @@ $('downloadCsv').onclick = async ()=>{
 };
 
 /* Pokoje (REST) */
+$('refreshRooms').onclick = refreshRooms;
+$('autoRooms').onchange   = setupAutoRooms;
+
+let auditTimer=null, roomsTimer=null;
+let selectedRoom=null;
+
+function setupAutoRooms(){ if(roomsTimer){clearInterval(roomsTimer);roomsTimer=null;} if($('autoRooms').checked){ roomsTimer=setInterval(refreshRooms, 15000); } }
+
 async function refreshRooms(){
   if(!token) return;
   const info=$('roomsInfo'); const tbody=$('roomsTbody');
@@ -414,9 +533,6 @@ async function refreshRooms(){
     });
   }catch(e){ info.textContent='Błąd: '+e.message; }
 }
-$('refreshRooms').onclick = refreshRooms;
-$('autoRooms').onchange = setupAutoRooms;
-function setupAutoRooms(){ if(roomsTimer){clearInterval(roomsTimer);roomsTimer=null;} if($('autoRooms').checked){ roomsTimer=setInterval(refreshRooms, 15000); } }
 
 /* Użytkownicy (REST) */
 $('userSearch').addEventListener('input', ()=> filterUsers());
@@ -427,6 +543,8 @@ function filterUsers(){
     tr.style.display = s.includes(q)? '' : 'none';
   });
 }
+$('refreshUsers').onclick = refreshUsers;
+
 async function refreshUsers(){
   if(!token || !selectedRoom){ $('usersInfo').textContent='Wybierz pokój powyżej.'; $('usersTbody').innerHTML=''; return; }
   const info=$('usersInfo'); const tbody=$('usersTbody'); info.textContent=''; tbody.innerHTML='';
@@ -460,8 +578,6 @@ async function refreshUsers(){
     filterUsers();
   }catch(e){ info.textContent='Błąd: '+e.message; }
 }
-$('refreshUsers').onclick = refreshUsers;
-
 </script>
 </body>
 </html>
